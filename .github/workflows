@@ -1,0 +1,87 @@
+name: Build ESP8266 Firmware
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write   # لازم عشان نقدر نمسح الـ artifacts القديمة تلقائيًا
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: 🗑️ مسح كل الـ Artifacts القديمة تلقائيًا (توفير مساحة التخزين)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const artifacts = await github.rest.actions.listArtifactsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+            if (artifacts.data.artifacts.length === 0) {
+              console.log("مفيش أي artifacts قديمة، مفيش حاجة نمسحها.");
+            }
+            for (const artifact of artifacts.data.artifacts) {
+              console.log(`جاري مسح: ${artifact.name} (id: ${artifact.id})`);
+              await github.rest.actions.deleteArtifact({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                artifact_id: artifact.id,
+              });
+            }
+
+      - name: فك ضغط ملف المشروع لو موجود (zip في جذر الريبو)
+        run: |
+          ZIP_FILE=$(find . -maxdepth 1 -iname "*.zip" | head -n 1)
+          if [ -n "$ZIP_FILE" ]; then
+            echo "Found zip: $ZIP_FILE - extracting..."
+            unzip -o "$ZIP_FILE" -d .
+          else
+            echo "No zip file found in repo root, assuming project already extracted."
+          fi
+
+      - name: تحديد فولدر مشروع PlatformIO تلقائيًا (بحث عن platformio.ini)
+        id: findproj
+        run: |
+          PROJ_DIR=$(find . -maxdepth 3 -iname "platformio.ini" -not -path "*/.git/*" | head -n 1 | xargs dirname)
+          if [ -z "$PROJ_DIR" ]; then
+            echo "::error::مفيش أي ملف platformio.ini اتلاقى في الريبو"
+            exit 1
+          fi
+          echo "Found PlatformIO project at: $PROJ_DIR"
+          echo "dir=$PROJ_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install -U platformio
+
+      - name: Build firmware (ESP8266 nodemcuv2)
+        working-directory: ${{ steps.findproj.outputs.dir }}
+        run: pio run
+
+      - name: Upload firmware.bin as downloadable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-bin
+          path: ${{ steps.findproj.outputs.dir }}/.pio/build/nodemcuv2/firmware.bin
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload full build folder (littlefs / bootloader / partitions لو محتاجهم)
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-build-output
+          path: ${{ steps.findproj.outputs.dir }}/.pio/build/nodemcuv2/
+          if-no-files-found: warn
+          retention-days: 1
